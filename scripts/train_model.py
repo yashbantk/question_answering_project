@@ -1,96 +1,112 @@
 import sys
 import os
+import torch
+import transformers
+import datasets
+import sklearn
+import pandas as pd
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer, DataCollatorWithPadding
+from datasets import load_dataset
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 
-def check_import(module_name):
-    try:
-        __import__(module_name)
-        return True
-    except ImportError:
-        return False
+print("\nModule versions:")
+print(f"Python version: {sys.version}")
+print(f"PyTorch version: {torch.__version__}")
+print(f"Transformers version: {transformers.__version__}")
+print(f"Datasets version: {datasets.__version__}")
+print(f"Scikit-learn version: {sklearn.__version__}")
+print(f"Pandas version: {pd.__version__}")
 
-required_modules = ['torch', 'transformers', 'datasets', 'sklearn', 'pandas']
+print(f"\nCUDA available: {torch.cuda.is_available()}")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
-print("Checking required modules:")
-for module in required_modules:
-    print(f"{module}: {'Installed' if check_import(module) else 'Not Installed'}")
+def preprocess_function(examples):
+    tokenized_inputs = tokenizer(examples['question'], truncation=True, padding=True)
+    tokenized_inputs['labels'] = examples['encoded_answer']  # Use the pre-encoded labels
+    return tokenized_inputs
 
-try:
-    import torch
-    import transformers
-    import datasets
-    import sklearn
-    import pandas as pd
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
-    from datasets import load_dataset
-    from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+def compute_metrics(pred):
+    labels = pred.label_ids
+    preds = pred.predictions.argmax(-1)
+    precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='weighted')
+    acc = accuracy_score(labels, preds)
+    return {"accuracy": acc, "f1": f1, "precision": precision, "recall": recall}
 
-    print("\nModule versions:")
-    print(f"Python version: {sys.version}")
-    print(f"PyTorch version: {torch.__version__}")
-    print(f"Transformers version: {transformers.__version__}")
-    print(f"Datasets version: {datasets.__version__}")
-    print(f"Scikit-learn version: {sklearn.__version__}")
-    print(f"Pandas version: {pd.__version__}")
+# Load dataset
+dataset = load_dataset("toughdata/quora-question-answer-dataset")
+print("Dataset loaded successfully")
 
-    print(f"\nCUDA available: {torch.cuda.is_available()}")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+# Convert the dataset to a Pandas DataFrame for easier manipulation
+df = pd.DataFrame(dataset['train'])
 
-    def preprocess_function(examples):
-        return tokenizer(examples['question1'], examples['question2'], truncation=True, padding=True)
+# Sample 1% of the data
+sample_size = int(len(df) * 0.01)
+df_sampled = df.sample(n=sample_size, random_state=42)
 
-    def compute_metrics(pred):
-        labels = pred.label_ids
-        preds = pred.predictions.argmax(-1)
-        precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='weighted')
-        acc = accuracy_score(labels, preds)
-        return {"accuracy": acc, "f1": f1, "precision": precision, "recall": recall}
+print(f"Original dataset size: {len(df)}")
+print(f"Sampled dataset size: {len(df_sampled)} (1% of original)")
 
-    # Load dataset
-    dataset = load_dataset("toughdata/quora-question-answer-dataset")
-    print("Dataset loaded successfully")
+# Inspect the unique values in the 'answer' column of the sampled dataset
+print("Unique values in 'answer' column of sampled data:")
+print(df_sampled['answer'].unique())
+print(f"Number of unique answers in sampled data: {df_sampled['answer'].nunique()}")
 
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-    print("Tokenizer loaded successfully")
+# Initialize the LabelEncoder and fit it to the 'answer' column of the sampled dataset
+label_encoder = LabelEncoder()
+df_sampled['encoded_answer'] = label_encoder.fit_transform(df_sampled['answer'])
 
-    model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=2)
-    print("Model loaded successfully")
+# Convert the sampled DataFrame back to a HuggingFace Dataset
+dataset_sampled = datasets.Dataset.from_pandas(df_sampled)
 
-    tokenized_datasets = dataset.map(preprocess_function, batched=True)
-    train_dataset = tokenized_datasets["train"]
-    val_dataset = tokenized_datasets["validation"]
-    print("Datasets preprocessed successfully")
+# Splitting the sampled dataset into training and validation sets
+train_test_split_dataset = dataset_sampled.train_test_split(test_size=0.2, random_state=42)
+train_dataset = train_test_split_dataset['train']
+val_dataset = train_test_split_dataset['test']
 
-    training_args = TrainingArguments(
-        output_dir="./results",
-        evaluation_strategy="epoch",
-        learning_rate=2e-5,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=16,
-        num_train_epochs=3,
-        weight_decay=0.01,
-    )
+print("Sampled dataset split into training and validation sets")
+print(f"Training set size: {len(train_dataset)}")
+print(f"Validation set size: {len(val_dataset)}")
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        compute_metrics=compute_metrics,
-    )
+tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+print("Tokenizer loaded successfully")
 
-    print("Starting training...")
-    trainer.train()
-    print("Training completed")
+model = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=len(label_encoder.classes_))
+print("Model loaded successfully")
 
-    print("Saving model...")
-    trainer.save_model("models/bert-base-uncased")
-    print("Model saved successfully")
+tokenized_train_dataset = train_dataset.map(preprocess_function, batched=True)
+tokenized_val_dataset = val_dataset.map(preprocess_function, batched=True)
+print("Datasets preprocessed successfully")
 
-except Exception as e:
-    print(f"\nAn error occurred: {e}")
-    print("\nDetailed error information:")
-    import traceback
-    traceback.print_exc()
+data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+
+training_args = TrainingArguments(
+    output_dir="./results",
+    evaluation_strategy="epoch",
+    learning_rate=2e-5,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=16,
+    num_train_epochs=3,
+    weight_decay=0.01,
+)
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_train_dataset,
+    eval_dataset=tokenized_val_dataset,
+    data_collator=data_collator,
+    compute_metrics=compute_metrics,
+)
+
+print("Starting training...")
+trainer.train()
+print("Training completed")
+
+print("Saving model...")
+trainer.save_model("models/bert-base-uncased-1percent")
+print("Model saved successfully")
 
 print("\nScript execution completed.")
